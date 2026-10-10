@@ -101,17 +101,21 @@ class Client:
 
     def put_json(
         self, path: str, payload: dict, timeout: int = 90
-    ) -> tuple[int, bytes]:
+    ) -> tuple[int, dict]:
         headers = {"Content-Type": "application/json"}
         if self.csrf:
             headers["X-CSRFToken"] = self.csrf
-        return self.request(
+        status, body = self.request(
             "PUT",
             path,
             data=json.dumps(payload).encode(),
             headers=headers,
             timeout=timeout,
         )
+        try:
+            return status, json.loads(body)
+        except Exception:  # noqa: BLE001
+            return status, {"_raw": body[:200].decode("utf-8", "replace")}
 
     def login(self, username: str, password: str) -> bool:
         status, body = self.get("/login/")
@@ -239,9 +243,23 @@ def main() -> int:
                 f"{jget(conn, 'message', '')}"
             )
 
-    # 8. charts really execute
+    # 8. charts really execute.
+    # `warm_up_cache` runs the chart's stored query server-side and reports a
+    # viz_error when it fails, so it is a genuine execution check — unlike the
+    # old version of this script, which read a raw response body and therefore
+    # reported OK for any HTTP 200.
     status, payload = client.json("/api/v1/chart/?q=(page_size:200)")
     chart_ids = payload.get("ids") or [] if status == 200 else []
+    # FAB caps page_size, so walk the pages until it stops returning rows.
+    page = 0
+    while status == 200 and payload.get("ids"):
+        page += 1
+        status, payload = client.json(
+            f"/api/v1/chart/?q=(page_size:100,page:{page})"
+        )
+        if status == 200:
+            chart_ids += payload.get("ids") or []
+    chart_ids = sorted(set(chart_ids))
     if not chart_ids:
         bad("no charts exist to test")
     checked = 0
@@ -253,17 +271,23 @@ def main() -> int:
             "/api/v1/chart/warm_up_cache", {"chart_id": chart_id}, timeout=180
         )
         errors = jget(result, "errors")
-        entry = (jget(result, "result") or [{}])[0]
-        # warm_up_cache reports failures as viz_error, not as `error`; missing it
-        # would let a broken chart pass as "executed (0 rows)".
+        entries = jget(result, "result") or []
+        entry = entries[0] if entries else {}
         viz_error = entry.get("viz_error")
-        if status == 200 and not errors and not viz_error:
+        viz_status = entry.get("viz_status")
+        if status == 200 and not errors and not viz_error and viz_status == "success":
             rows = entry.get("rows")
             suffix = f" ({rows} row(s))" if rows is not None else ""
             ok(f"chart id={chart_id} executed{suffix}")
         else:
             detail = viz_error or errors or result.get("message") or result
-            bad(f"chart id={chart_id} -> {json.dumps(detail, default=str)[:200]}")
+            bad(
+                f"chart id={chart_id} -> HTTP {status} "
+                f"{json.dumps(detail, default=str)[:180]}"
+            )
+    if max_charts and len(chart_ids) > checked:
+        print(f"  ..   checked {checked} of {len(chart_ids)} charts "
+              f"(--all-charts runs the rest)")
 
     print()
     if failures == 0:

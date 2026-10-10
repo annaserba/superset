@@ -101,7 +101,10 @@ ws.addEventListener('message', (event) => {
     return;
   }
   if (message.method === 'Runtime.consoleAPICalled' && message.params.type === 'error') {
-    consoleErrors.push(message.params.args.map((a) => a.value ?? a.description).join(' '));
+    const text = message.params.args.map((a) => a.value ?? a.description).join(' ');
+    // Superset registers a PWA service worker that the image does not ship;
+    // the resulting 404 is benign and would otherwise fail every run.
+    if (!/Service Worker registration failed/i.test(text)) consoleErrors.push(text);
   }
   if (message.method === 'Runtime.exceptionThrown') {
     consoleErrors.push(message.params.exceptionDetails.text
@@ -200,9 +203,9 @@ if (badResponses.length) {
 
 // 4. screenshot
 mkdirSync(dirname(outPath), { recursive: true });
-const shot = await call('Page.captureScreenshot', {
-  format: 'png', captureBeyondViewport: true,
-});
+// captureBeyondViewport renders off-screen content black on pages this wide,
+// so capture the viewport instead.
+const shot = await call('Page.captureScreenshot', { format: 'png' });
 writeFileSync(outPath, Buffer.from(shot.data, 'base64'));
 console.log(`screenshot written: ${outPath}`);
 

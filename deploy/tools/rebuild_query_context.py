@@ -34,6 +34,36 @@ from superset.app import create_app  # noqa: E402
 app = create_app()
 
 
+def as_admin():
+    """Run the rest of the function with an admin identity in Flask's globals.
+
+    Building a query context goes through the security manager
+    (`can_access_all_datasources`), which reads `flask.g.user`; a bare CLI run
+    has no user and fails with `AttributeError: user`.  This is a maintenance
+    script executed by the operator against their own instance, so acting as the
+    admin is the intended privilege level.
+    """
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _ctx():
+        from flask import g
+
+        from superset import db, security_manager
+
+        with app.app_context():
+            admin = db.session.query(security_manager.user_model).first()
+            if admin is None:
+                raise RuntimeError("no user in the metadata database")
+            try:
+                g.user = admin
+            except Exception:  # noqa: BLE001 - g may be read-only in some setups
+                pass
+            yield
+
+    return _ctx()
+
+
 def metric_reference(metric, columns: dict, saved_metrics: set[str]) -> str:
     """Return a metric reference Superset accepts in a query object.
 
@@ -98,6 +128,44 @@ def resolve_metrics(raw_metrics, columns: dict, saved_metrics: set[str]) -> list
     return resolved
 
 
+# The explore form stores filters in the legacy shape (subject/comparator/
+# operator/clause); the query-object schema wants (col/op/val).
+LEGACY_OPERATORS = {
+    "==": "==", "=": "==", "!=": "!=", "<>": "!=", ">": ">", "<": "<",
+    ">=": ">=", "<=": "<=", "IN": "IN", "NOT IN": "NOT IN",
+    "IS NULL": "IS NULL", "IS NOT NULL": "IS NOT NULL",
+    "IS TRUE": "IS TRUE", "IS FALSE": "IS FALSE",
+    "LIKE": "LIKE", "NOT LIKE": "NOT LIKE", "ILIKE": "ILIKE", "NOT ILIKE": "NOT ILIKE",
+    "TEMPORAL_RANGE": "TEMPORAL_RANGE", "TEMPORAL_RANGE_2020": "TEMPORAL_RANGE",
+}
+
+
+def modern_filter(item, columns: set[str]) -> dict | None:
+    """Convert one stored adhoc filter into the modern filter object."""
+    if not isinstance(item, dict):
+        return None
+    # already modern
+    if "col" in item and "op" in item:
+        return item
+    subject = item.get("subject")
+    operator = LEGACY_OPERATORS.get(str(item.get("operator") or "").upper()) \
+        or LEGACY_OPERATORS.get(str(item.get("operator") or "")) \
+        or "=="
+    comparator = item.get("comparator")
+    if subject is None:
+        return None
+    # a plain value filter that compares a temporal column against "No filter"
+    if operator == "TEMPORAL_RANGE":
+        comparator = comparator or "No filter"
+    filt: dict = {"col": subject, "op": operator}
+    if operator not in ("IS NULL", "IS NOT NULL", "IS TRUE", "IS FALSE"):
+        if operator in ("IN", "NOT IN") and isinstance(comparator, str):
+            filt["val"] = [part.strip() for part in comparator.split(",") if part.strip()]
+        else:
+            filt["val"] = comparator
+    return filt
+
+
 def temporal_columns(datasource) -> list[str]:
     temporal = []
     for column in datasource.columns:
@@ -132,14 +200,22 @@ def build_query(form: dict, datasource) -> dict:
         groupby = [groupby]
     query["columns"] = [c for c in (groupby or []) if c in columns]
 
-    # metrics
-    raw_metrics = (
-        form.get("metrics")
-        or form.get("metric")
-        or form.get("y_axis")
-        or form.get("size")
-        or []
-    )
+    # metrics.  Gantt charts use `y_axis` as a categorical row dimension, so it
+    # must not be turned into a metric there ("Metric 'status' does not exist").
+    viz_type = form.get("viz_type") or ""
+    if viz_type == "gantt_chart":
+        raw_metrics = form.get("metrics") or form.get("metric") or []
+        y_axis = form.get("y_axis")
+        if isinstance(y_axis, str) and y_axis in columns and y_axis not in query["columns"]:
+            query["columns"].append(y_axis)
+    else:
+        raw_metrics = (
+            form.get("metrics")
+            or form.get("metric")
+            or form.get("y_axis")
+            or form.get("size")
+            or []
+        )
     if not isinstance(raw_metrics, list):
         raw_metrics = [raw_metrics]
     metrics = resolve_metrics([m for m in raw_metrics if m], columns, saved_metrics)
@@ -158,8 +234,10 @@ def build_query(form: dict, datasource) -> dict:
         order_by[0], (list, tuple)
     ):
         query["orderby"] = [tuple(item) for item in order_by]
-    if form.get("adhoc_filters"):
-        query["filters"] = form["adhoc_filters"]
+    raw_filters = form.get("adhoc_filters") or []
+    filters = [f for f in (modern_filter(item, columns) for item in raw_filters) if f]
+    if filters:
+        query["filters"] = filters
     if form.get("is_timeseries") is not None:
         query["is_timeseries"] = bool(form["is_timeseries"])
     return query
@@ -171,7 +249,7 @@ def main() -> int:
     parser.add_argument("--chart-id", type=int, action="append")
     args = parser.parse_args()
 
-    with app.app_context():
+    with as_admin():
         from superset import db
         from superset.charts.schemas import ChartDataQueryContextSchema
         from superset.connectors.sqla.models import SqlaTable

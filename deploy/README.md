@@ -87,7 +87,9 @@ Superset читает конфигурацию из `SUPERSET__<СЕКЦИЯ>__<
 | нет healthcheck у приложения | healthcheck на `/health`, `restart: unless-stopped` |
 | в образе нет драйвера Postgres и нет компилятора | тонкий образ `deploy/Dockerfile` (psycopg2-binary + pg8000 через `uv`) |
 | `recent activity` давал баннер Forbidden | `DASHBOARD_RECENT_ACTIVITY = False` |
-| `/static/service-worker.js` → 404 (шум в консоли) | известное поведение, smoke-тест допускает 404 |
+| `/static/service-worker.js` → 404 (шум в консоли) | известное поведение, smoke-тест и скриншотер допускают 404 |
+| у 103 из 108 чартов `query_context` был NULL, у остальных строковые метрики → API-путь (`warm_up_cache`, экспорт, алерты) падал | `tools/rebuild_query_context.py` + `tools/fix_api_query_contexts.py` |
+| плитки дашборда в одну строку ~2600 px (2 чарта за экраном) | `tools/fix_dashboard_layout.py` |
 | порт 5432 был опубликован наружу | база доступна только внутри сети compose |
 | один том Postgres на два стека (риск порчи данных) | тестовый стек удалён, `name: superset` фиксирует имя проекта |
 | старый `~/superset/docker-compose.yml` вводил в заблуждение | переименован в `~/superset/docker-compose.yml.disabled` |
@@ -109,7 +111,9 @@ apache-superset/                  # клон apache/superset, ветка master-
 │   └── tools/
 │       ├── screenshot.mjs                 # скриншот UI через headless Chrome
 │       ├── modernize_charts.py            # нормализация метрик и фильтров
-│       └── rebuild_query_context.py       # пересборка query_context
+│       ├── rebuild_query_context.py       # пересборка query_context
+│       ├── fix_api_query_contexts.py      # метрики в query_context -> adhoc-объекты
+│       └── fix_dashboard_layout.py        # валидный grid дашборда
 ├── superset/                     # исходники (python)
 └── superset-frontend/            # исходники (react)
 ```
@@ -180,10 +184,14 @@ node tools/screenshot.mjs http://localhost:8088/superset/dashboard/10/ /tmp/dash
 `smoke_test.py` проверяет: `/health`, отдачу фронтенда, 404 сервис-воркера,
 логин, `/api/v1/me/`, наличие дашбордов/чартов/датасетов/подключений, тест
 каждого подключения и **реальное выполнение чартов** через
-`PUT /api/v1/chart/warm_up_cache` (он прогоняет запрос чарта и возвращает
-`viz_error`, если что-то не так). Сырой `POST /api/v1/chart/data` для этого не
-годится: он требует, чтобы вызывающий сам собрал query object, и отвечает
-`Request is incorrect` на валидные запросы.
+`PUT /api/v1/chart/warm_up_cache`: он прогоняет запрос чарта на сервере и
+возвращает `viz_error`/`viz_status`, поэтому «зелёный» тест означает, что чарты
+действительно считаются. Идентификаторы чартов перебираются постранично
+(`page_size` в Superset ограничен сотней).
+
+Сырой `POST /api/v1/chart/data` для проверки не годится: он требует, чтобы
+вызывающий сам собрал query object, и отвечает `Request is incorrect` на
+валидные запросы.
 
 ## 6. Если чарты снова показывают ошибку данных
 
@@ -200,6 +208,17 @@ docker exec superset-superset-1 /app/.venv/bin/python /tmp/rq.py
 # 3. если чарт пришёл из старой версии Superset — нормализовать метрики и фильтры
 docker cp tools/modernize_charts.py superset-superset-1:/tmp/mc.py
 docker exec superset-superset-1 /app/.venv/bin/python /tmp/mc.py --chart-id 104
+
+# 4. если API-путь жалуется «Metric 'X' does not exist» (UI при этом работает)
+#    — в сохранённом query_context метрики лежат строками, а не объектами
+docker cp tools/fix_api_query_contexts.py superset-superset-1:/tmp/fq.py
+docker exec superset-superset-1 /app/.venv/bin/python /tmp/fq.py
+```
+
+Проверить всё сразу:
+
+```bash
+python3 smoke_test.py --all-charts      # выполняет каждый чарт инстанса
 ```
 
 Инструменты идемпотентны и умеют `--dry-run`.
