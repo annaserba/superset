@@ -1,0 +1,139 @@
+# Superset stack for this machine (Apache Superset 6.1.0 + PostgreSQL + Redis).
+#
+#   cd deploy && cp .env.example .env     # then put a real secret in .env
+#   docker compose up -d --build
+#   open http://localhost:8088            # admin / admin
+#   ./smoke_test.sh                       # verifies health, auth, assets, charts
+#
+# This replaces the previous minimal compose file, which ran
+# `apache/superset:latest` with a hardcoded secret, no Redis, no init step, no
+# healthcheck, and a typo (`SUPERSET__DATABASE__SQLALCHY_URI`) that made
+# Superset silently fall back to SQLite.
+#
+# `name:` pins the compose project name.  Without it the project would be named
+# after this directory and every volume would get a different prefix.
+name: superset
+
+x-superset-image: &superset-image local/superset:${SUPERSET_VERSION:-6.1.0}
+x-superset-build: &superset-build
+  context: .
+  dockerfile: Dockerfile
+  args:
+    SUPERSET_BASE: ${SUPERSET_VERSION:-6.1.0}
+
+x-superset-env: &superset-env
+  SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:?set SUPERSET_SECRET_KEY in deploy/.env}
+  # Superset's own storage lives in its OWN database (superset_metadata), not in
+  # the same database as the data being charted.  psycopg2 comes from ./Dockerfile.
+  SUPERSET_METADATA_DB_URI: postgresql+psycopg2://${POSTGRES_USER:-superset}:${POSTGRES_PASSWORD:-superset}@db:5432/superset_metadata
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  PYTHONPATH: /app/pythonpath:/app/docker
+  SUPERSET_ENV: production
+  SUPERSET_LOAD_EXAMPLES: ${SUPERSET_LOAD_EXAMPLES:-false}
+  # Bootstrap scripts run from /app/docker; the tagged image ships them.
+  DEV_MODE: "false"
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "no"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  db:
+    image: postgres:${POSTGRES_VERSION:-17}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-superset}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-superset}
+      POSTGRES_DB: ${POSTGRES_DB:-superset}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      # Creates superset_metadata on the first start of an empty volume.
+      - ./docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-superset} -d ${POSTGRES_DB:-superset}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # One-shot: apply metadata migrations, create the admin user, sync roles and
+  # permissions.  The old stack never ran this, which is why the Admin role was
+  # left with 30 permissions instead of ~230 and the UI answered 403 Forbidden.
+  superset-init:
+    image: *superset-image
+    build: *superset-build
+    environment: *superset-env
+    command: ["/app/docker/docker-init.sh"]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./superset_config.py:/app/pythonpath/superset_config.py:ro
+      - superset_home:/app/superset_home
+    restart: "no"
+
+  superset:
+    image: *superset-image
+    build: *superset-build
+    restart: unless-stopped
+    environment: *superset-env
+    command: ["/app/docker/docker-bootstrap.sh", "app-gunicorn"]
+    depends_on:
+      superset-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    ports:
+      - "${SUPERSET_PORT:-8088}:8088"
+    volumes:
+      - ./superset_config.py:/app/pythonpath/superset_config.py:ro
+      - superset_home:/app/superset_home
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8088/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  # Async SQL Lab / alerts & reports worker.  Idle unless ASYNC_QUERIES is
+  # switched on in superset_config.py, but it makes the stack feature-complete.
+  # The base image's own HEALTHCHECK is a Superset CLI check that does not hold
+  # for a celery worker, so override it with a cheap liveness probe.
+  superset-worker:
+    image: *superset-image
+    build: *superset-build
+    restart: unless-stopped
+    environment: *superset-env
+    command: ["/app/docker/docker-bootstrap.sh", "worker"]
+    depends_on:
+      superset-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./superset_config.py:/app/pythonpath/superset_config.py:ro
+      - superset_home:/app/superset_home
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A superset.tasks.celery_app:app inspect ping -d celery@$$HOSTNAME || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 60s
+
+volumes:
+  db_data:
+    name: superset_db_data
+  superset_home:
+    name: superset_superset_home
+  redis_data:
+    name: superset_redis_data

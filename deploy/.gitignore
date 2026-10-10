@@ -1,0 +1,9 @@
+# Local secrets and machine-specific state for the Superset deployment.
+.env
+.env-local
+
+# Runtime junk
+*.log
+*.pid
+__pycache__/
+.DS_Store

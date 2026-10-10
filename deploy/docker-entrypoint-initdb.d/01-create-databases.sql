@@ -1,0 +1,12 @@
+-- Runs once, on the very first start of an empty postgres volume.
+--
+-- Superset needs two logically different things:
+--   1. METADATA  — its own storage: users, roles, charts, dashboards, logs.
+--   2. DATA      — the tables people build charts from.
+--
+-- The previous deployment kept both in the same database, which is how the
+-- example tables (employees, sales) ended up mixed with Superset's internal
+-- tables.  They are kept apart from the start.
+--
+-- The data database name must match POSTGRES_DB in .env (default: superset).
+CREATE DATABASE superset_metadata OWNER superset;
