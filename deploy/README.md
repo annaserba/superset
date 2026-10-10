@@ -8,7 +8,7 @@
 |---|---|
 | Каталог | `~/Yandex.Disk.localized/Projects/apache-superset` |
 | UI | http://localhost:8088 |
-| Логин | `admin` / пароль из `deploy/.env` (сейчас `admin`) |
+| Логин | `admin` / `admin` (пароль задаётся `ADMIN_PASSWORD` в `deploy/.env`) |
 | Версия | Apache Superset **6.1.0** |
 | Метаданные | PostgreSQL 17, база `superset_metadata` |
 | Данные | PostgreSQL 17, база `superset` (таблицы `sales`, `employees`) |
