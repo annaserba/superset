@@ -1,0 +1,5 @@
+# Build context for the derived Superset image: only the Dockerfile is needed.
+# Without this, `docker compose build` would upload .env (secrets), backups and
+# local notes into the Docker daemon.
+*
+!Dockerfile
