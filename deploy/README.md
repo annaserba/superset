@@ -108,9 +108,7 @@ apache-superset/                  # клон apache/superset, ветка master-
 │   ├── Makefile                  # up/down/logs/smoke/backup/restore/…
 │   └── tools/
 │       ├── screenshot.mjs                 # скриншот UI через headless Chrome
-│       ├── configure_charts.py            # явная настройка мигрированных чартов
-│       ├── reshape_charts.py              # приведение чартов к per-viz формату
-│       ├── modernize_charts.py            # нормализация метрик/фильтров
+│       ├── modernize_charts.py            # нормализация метрик и фильтров
 │       └── rebuild_query_context.py       # пересборка query_context
 ├── superset/                     # исходники (python)
 └── superset-frontend/            # исходники (react)
@@ -199,9 +197,9 @@ node tools/screenshot.mjs http://localhost:8088/superset/dashboard/10/ /tmp/dash
 docker cp tools/rebuild_query_context.py superset-superset-1:/tmp/rq.py
 docker exec superset-superset-1 /app/.venv/bin/python /tmp/rq.py
 
-# 3. если чарт пришёл из старой версии Superset — привести params к текущему виду
-docker cp tools/reshape_charts.py superset-superset-1:/tmp/rc.py
-docker exec superset-superset-1 /app/.venv/bin/python /tmp/rc.py --chart-id 104
+# 3. если чарт пришёл из старой версии Superset — нормализовать метрики и фильтры
+docker cp tools/modernize_charts.py superset-superset-1:/tmp/mc.py
+docker exec superset-superset-1 /app/.venv/bin/python /tmp/mc.py --chart-id 104
 ```
 
 Инструменты идемпотентны и умеют `--dry-run`.
