@@ -134,6 +134,13 @@ TALISMAN_ENABLED = SESSION_COOKIE_SECURE
 WTF_CSRF_ENABLED = True
 WTF_CSRF_TIME_LIMIT = None
 
+# Anonymous read-only dashboards.  "Public" selects the curated Public-role
+# permission set (dashboards and charts only, no SQL Lab and no Security), so an
+# unauthenticated visitor opens a dashboard link without a login form.  Which
+# dashboards become visible is decided by the Public role's datasource grants:
+# only published dashboards whose datasets the role may read show up.
+PUBLIC_ROLE_LIKE = "Public"
+
 # Uploaded CSV/Excel files land here (backed by the superset_home volume).
 UPLOAD_FOLDER = os.environ.get("SUPERSET_UPLOAD_FOLDER", "/app/superset_home/uploads/")
 
