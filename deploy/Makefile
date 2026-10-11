@@ -10,7 +10,7 @@ PYTHON ?= python3
 BACKUP_DIR := backups
 STAMP := $(shell date +%Y%m%d-%H%M%S)
 
-.PHONY: help up down restart build logs ps init shell smoke backup restore psql clean
+.PHONY: help up down restart build logs ps init shell smoke backup restore psql climate-sync clean
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -48,6 +48,10 @@ psql-meta: ## psql into the METADATA database (superset_metadata)
 
 smoke: ## Run the post-deploy checks against $(BASE_URL)
 	./smoke_test.py --url $(BASE_URL)
+
+climate-sync: ## Copy «Климат дома» data from the climate service into the data DB
+	$(COMPOSE) cp tools/climate_sync.py superset:/tmp/climate_sync.py
+	$(COMPOSE) exec -T superset /app/.venv/bin/python /tmp/climate_sync.py
 
 backup: ## Dump metadata and archive superset_home into backups/
 	@mkdir -p $(BACKUP_DIR)

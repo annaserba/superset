@@ -188,13 +188,56 @@ def build_query(form: dict, datasource) -> dict:
         query["granularity"] = time_column
     query["time_range"] = form.get("time_range") or "No filter"
 
+    # Raw tables ("query_mode: raw") select columns verbatim and carry no
+    # metrics.  Building the aggregate query below for them would silently turn
+    # the table into one COUNT(*) column per group-by, so they get their own
+    # query object.
+    if form.get("query_mode") == "raw" or form.get("all_columns"):
+        query["columns"] = [c for c in (form.get("all_columns") or []) if c in columns]
+        query["metrics"] = []
+        query["is_timeseries"] = False
+        orderby = []
+        for item in form.get("order_by_cols") or []:
+            try:
+                column_name, ascending = (
+                    json.loads(item) if isinstance(item, str) else item
+                )
+            except (ValueError, TypeError):
+                continue
+            if column_name in columns:
+                orderby.append([column_name, bool(ascending)])
+        if orderby:
+            query["orderby"] = orderby
+        filters = [
+            f
+            for f in (
+                modern_filter(item, columns)
+                for item in form.get("adhoc_filters") or []
+            )
+            if f
+        ]
+        if filters:
+            query["filters"] = filters
+        return query
+
     # group-by dimension: new name first, then the legacy per-viz fields.
+    # A bar/line chart with a *categorical* x_axis groups by that column (only a
+    # temporal x_axis becomes the query granularity), so it counts as a dimension.
+    x_axis = form.get("x_axis")
+    categorical_x = (
+        x_axis
+        if isinstance(x_axis, str)
+        and x_axis in columns
+        and x_axis not in temporal_columns(datasource)
+        else None
+    )
     groupby = (
         form.get("groupby")
         or form.get("columns")
         or form.get("series")
         or form.get("entity")
         or form.get("dimension")
+        or ([categorical_x] if categorical_x else None)
     )
     if isinstance(groupby, str):
         groupby = [groupby]

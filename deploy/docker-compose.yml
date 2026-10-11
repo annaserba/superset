@@ -31,6 +31,9 @@ x-superset-env: &superset-env
   PYTHONPATH: /app/pythonpath:/app/docker
   SUPERSET_ENV: production
   SUPERSET_LOAD_EXAMPLES: ${SUPERSET_LOAD_EXAMPLES:-false}
+  # Home climate service (dashboard «Климат дома»); consumed by tools/climate_sync.py
+  CLIMATE_API_URL: ${CLIMATE_API_URL:-}
+  CLIMATE_API_KEY: ${CLIMATE_API_KEY:-}
   # Bootstrap scripts run from /app/docker; the tagged image ships them.
   DEV_MODE: "false"
 

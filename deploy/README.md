@@ -112,8 +112,9 @@ apache-superset/                  # клон apache/superset, ветка master-
 │       ├── screenshot.mjs                 # скриншот UI через headless Chrome
 │       ├── modernize_charts.py            # нормализация метрик и фильтров
 │       ├── rebuild_query_context.py       # пересборка query_context
-│       ├── fix_api_query_contexts.py      # метрики в query_context -> adhoc-объекты
-│       └── fix_dashboard_layout.py        # валидный grid дашборда
+│       ├── fix_api_query_contexts.py       # метрики в query_context -> adhoc-объекты
+│       ├── fix_dashboard_layout.py        # валидный grid дашборда
+│       └── climate_sync.py                # «Климат дома»: сервис -> таблицы Superset
 ├── superset/                     # исходники (python)
 └── superset-frontend/            # исходники (react)
 ```
@@ -164,6 +165,7 @@ docker compose exec db psql -U superset -d superset            # данные
 
 make backup      # pg_dump метаданных + tar тома superset_home в deploy/backups/
 make restore FILE=backups/superset_metadata_*.sql
+make climate-sync   # свежие данные «Климат дома» из климат-сервиса (см. §7)
 ```
 
 Обновление версии:
@@ -223,7 +225,50 @@ python3 smoke_test.py --all-charts      # выполняет каждый чар
 
 Инструменты идемпотентны и умеют `--dry-run`.
 
-## 7. Работа с форком
+## 7. Дашборд «Климат дома»
+
+Перенесён из Kimi, где он собран из пяти HTML-виджетов, проксирующих
+климат-сервис `http://144.124.255.55:8765` (Яндекс Умный Дом: датчик спальни,
+кондиционер, увлажнитель; решения принимает DeepSeek). В Superset это нативный
+дашборд, а не вставка чужой вёрстки.
+
+| Что | Значение |
+|---|---|
+| Дашборд | `Климат дома`, id 16, 13 чартов в 7 строках, опубликован |
+| URL | http://localhost:8088/superset/dashboard/16/ |
+| Датасеты | `climate_readings`, `climate_daily`, `climate_ai_decisions`, `climate_ai_state`, `climate_service_status`, `climate_current` — в БД данных `superset` |
+| Источник | `/api/artifact/climate` и `/api/artifact/ai` климат-сервиса |
+| Секрет | `CLIMATE_API_URL` и `CLIMATE_API_KEY` в `deploy/.env` |
+| Обновление | `make climate-sync` (идемпотентно, `--dry-run` — только чтение) |
+
+Данные копируются в Postgres, потому что Superset не умеет читать HTTP-API
+напрямую. Сервис отдаёт последние 48 часов и агрегаты за 7 дней, хотя внутри
+держит ~3900 показаний, поэтому историю накапливает именно Superset: каждый
+запуск синхронизации дописывает серию (`ON CONFLICT (ts) DO UPDATE`).
+
+Чарты: KPI (температура, влажность, цель кондиционера, улица), температура и
+влажность за 48 часов, мин/макс/средняя по дням, часы работы кондиционера,
+недельная статистика, журнал AI-решений, состояние AI-управления, статус
+сервиса и сводка «сейчас».
+
+Особенности Superset 6.1.0, найденные при переносе:
+
+* **пресеты «Last N hours» / «Last N minutes» сломаны** —
+  `superset/utils/date_parser.py:get_since_until` падает с
+  `From date cannot be larger than to date` на `Last 1 hour`, `Last 24 hours`,
+  `Last 48 hours` (при этом `Last 7 days` работает). В 48-часовых чартах
+  используется равнозначный диапазон `48 hours ago : now`;
+* чарты, созданные через REST API, сохраняются **без `query_context`**, а их
+  строковые метрики не резолвятся API-путём (дефект №3, но уже для новых
+  чартов). Лечится парой
+  `tools/rebuild_query_context.py` + `tools/fix_api_query_contexts.py`;
+  `rebuild_query_context.py` теперь понимает и таблицы в режиме `raw`;
+* датасет с непустым `schema` роняет детектор форматов дат:
+  `datetime_format_detector.py:140` передаёт схему в аргумент `catalog`
+  (`database.get_df(query_sql, dataset.schema)`), и Postgres ищет базу
+  `public`. Поэтому у датасетов `schema` пустая — как у `sales`/`employees`.
+
+## 8. Работа с форком
 
 ```bash
 cd ~/Yandex.Disk.localized/Projects/apache-superset
@@ -239,7 +284,7 @@ git push origin fix/my-change      # PR в apache/superset при желании
 * `upstream` → `https://github.com/apache/superset.git` (только чтение);
 * `core.fileMode=false` — Яндекс.Диск не сохраняет POSIX-права бит-в-бит.
 
-## 8. Особенности Яндекс.Диска
+## 9. Особенности Яндекс.Диска
 
 * Клиент синхронизирует и `.git`, поэтому история доступна с других машин; но
   не запускайте два `git` одновременно и не коммитьте во время активной
@@ -249,7 +294,7 @@ git push origin fix/my-change      # PR в apache/superset при желании
 * Docker-тома Яндекс.Диск не синхронизирует: данные Superset живут в Docker,
   а не в файлах проекта. Бэкап — `make backup`.
 
-## 9. Границы
+## 10. Границы
 
 * Продакшн-конфигурация (TLS, reverse proxy, внешний Postgres, алерты) не
   настраивалась: официальный Superset прямо предупреждает, что docker compose
@@ -259,6 +304,15 @@ git push origin fix/my-change      # PR в apache/superset при желании
   вместе с `allow_run_async` у подключения к БД.
 * Сборка фронтенда из исходников (`superset-frontend`) не выполнялась —
   используется готовый бандл из образа. Для неё нужны node/pnpm и ~20 минут.
-* 4 дашборда `[ untitled dashboard ]` остались пустыми, как и были: в них
-  изначально нет ни одной плитки. Чарты, которые к ним не привязаны, лежат в
-  списке Charts.
+* Пустые дашборды удалены 2026-10-10: `HR & People` (id 11) и `[ untitled
+  dashboard ]` (id 12–15) содержали только каркас ROOT/GRID/HEADER, без единой
+  плитки. Остались 10 дашбордов с чартами (3–25 плиток каждый). Экспорт
+  удалённых — `backups/empty_dashboards_20261010.zip`, вернуть можно так:
+  `docker cp backups/empty_dashboards_20261010.zip superset-superset-1:/tmp/`
+  и `docker compose exec superset /app/.venv/bin/superset import-dashboards
+  -p /tmp/empty_dashboards_20261010.zip`. Чарты, которые не привязаны к
+  дашбордам, лежат в списке Charts.
+* Дашборд «Климат дома» показывает состояние на момент последнего
+  `make climate-sync` — сам он не обновляется, расписания на машине нет.
+  Климат-сервис и автоматизации Kimi продолжают работать как раньше: Superset
+  только читает их данные и ничего не отправляет обратно.
